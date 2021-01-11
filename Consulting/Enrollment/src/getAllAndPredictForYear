@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# If we were given an argument, use it as the end year for which to pull
+# data
+if [ $# -eq 0 ]
+then
+   echo "Need a year parameter"
+   exit
+fi
+
+./getHistoryForYear $1
+./getDataAndPredict $1

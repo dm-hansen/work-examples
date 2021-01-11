@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Directory to write output to
+OUTDIR="../../"
+
+# If we were given an argument, use it as the year for which to pull
+# data; otherwise we use the current year
+YEAR=`date +%Y`
+if [ $# -gt 0 ]
+then
+     YEAR=$1
+fi
+
+# Generate the current year prediction inputs for each of the models
+for MODEL in fall apply admit
+do
+   # The given year's prediction inputs
+   echo "executing $MODEL for $YEAR..."
+   rm -rf  ${OUTDIR}/${MODEL}_${YEAR}.out
+   gfu_predict ${OUTDIR}/Networks/${MODEL}_${YEAR}.net ${OUTDIR}/Data/${MODEL}_${YEAR}_predict.data  > ${OUTDIR}/${MODEL}_${YEAR}.out
+done

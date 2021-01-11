@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Location of Oracle JDBC driver
+JDBCJAR="/Applications/SQLWorkbenchj/ojdbc6.jar"
+
+# Directory to write datafiles to
+DATADIR="../../Data"
+
+# If we were given an argument, use it as the year for which to pull
+# data; otherwise we use the current year
+YEAR=`date +%Y`
+if [ $# -gt 0 ]
+then
+  YEAR=$1
+fi
+
+# Generate the current year prediction inputs for each of the models
+for MODEL in apply admit fall
+do
+   # The given year's prediction inputs
+   echo "pulling predictive $MODEL for $YEAR..."
+   rm -rf ${DATADIR}/${MODEL}_${YEAR}_predict.*
+   java -Xmx512m -cp .:$JDBCJAR ExtractData --$MODEL --from $YEAR --to $YEAR --predict --output ${DATADIR}/${MODEL}_${YEAR}_predict.data 
+done

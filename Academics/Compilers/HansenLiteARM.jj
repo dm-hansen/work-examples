@@ -1,0 +1,766 @@
+PARSER_BEGIN(HansenLite)
+
+   import java.io.InputStreamReader;
+   import java.io.PrintWriter;
+   import java.util.Deque;
+   import java.util.ArrayDeque;
+   import java.util.LinkedList;
+   import java.util.HashMap;
+   import java.util.Map;
+
+   /**
+    * Defines the HansenLite language and provides parsing and a VM for
+    * execution
+    */
+   public class HansenLite {
+      // A couple of class variables that define the name and version of
+      // the language
+      private final static String VERSION = "2.0";
+      private final static String LANGUAGE_NAME = "HansenLite";
+      private final static String DESCRIPTION = LANGUAGE_NAME + " Parser Version " + VERSION;
+      private final static String SUFFIX = ".s";
+
+
+      // Output file
+      private static PrintWriter OUTPUT_FILE = null;
+
+      // Stack used to keep track of the current label context for code
+      // generation
+      private static Deque<Integer> LABEL_STACK = new ArrayDeque<Integer>();
+      // Counter used to create globally unique begin/end labels
+      private static int NEXT_LABEL_NUM = 0;
+
+
+      // Map of defined variable names 
+      private static Map<String, Symbol> SYMBOL_TABLE = new HashMap<String, Symbol>();
+      // Similar map for all string constants
+      private static Map<String, Symbol> CONSTANT_POOL = new HashMap<String, Symbol>();
+
+
+      private static Deque<Symbol> OPERAND_STACK = new ArrayDeque<Symbol>();
+
+
+      private static final int NUM_REGISTERS = 8; // Restrict to general purpose registers 2-10
+
+      // Names used for the numeric and string printf formats
+      private static final String NUMBER_FORMAT = "numfmt";
+      private static final String STRING_FORMAT = "strfmt";
+
+
+      private static final int WORD_SIZE = 4; // 32-bit int and floats
+
+
+      private static String DIV_INSTRUCTION = "__aeabi_idiv";
+
+      /******************************
+       * Parse the program in the given file, writing ARM assembly to the
+       * output file
+       *
+       * @param args first element contains optional filename to compile
+       */
+      public static void main(String args[]) throws RuntimeException {
+         // A parser instance
+         HansenLite parser = null;
+
+         // If insufficient command-line arguments then display error and
+         // exit
+         if (args.length < 2) {
+            System.err.println(DESCRIPTION + ":\n  Usage: java HansenLite <inputFile> <outputFile>");
+            System.exit(1);
+         }
+
+         // Try to open the source file using the first argument 
+         try {
+            parser = new HansenLite(new java.io.FileInputStream(args[0]));
+         } catch (java.io.FileNotFoundException e) {
+            System.err.println(DESCRIPTION + ":  File " + args[0] + " not found.");
+            System.exit(1);
+         }
+
+         try {
+            OUTPUT_FILE = new PrintWriter(args[1] + (args[1].endsWith(SUFFIX) ? "" : SUFFIX));
+         } catch (java.io.IOException e) {
+            System.err.println(DESCRIPTION + ":  Error opening " + args[1] + ".s for ouptput.");
+            System.exit(1);
+         }
+
+         // Output the preamble to the output file - saves the lr and sets fp to sp
+         emit(".extern printf\n.extern " + DIV_INSTRUCTION
+               +"\n\n.global main\n.text\nmain:\npush {lr}\nmov fp, sp\n\n");
+
+         // Parse the source. Parse errors will terminate the
+         // parsing by throwing a ParseException; catch those, display
+         // and exit
+         try {
+            // The Statement production is the start of the
+            // grammar. So begin there and see if we can successfully
+            // parse the input
+            parser.Statement();
+            System.out.println("Success!");
+         } 
+         catch (ParseException e) { // Parser error?
+            System.err.println(DESCRIPTION + ":  Encountered errors during parse.");
+            System.err.println(e);
+            System.exit(1);
+         }
+
+         // Terminate the main method by returning 0 from main and we're done.
+         emit("\n\nquitMain:\nmov sp, fp\npop {lr}\nmov r0, #0\nbx lr\n\n");
+
+         // We also need a data section with space for constant strings
+         emit(".data\n");
+         // Allocate space for each string constant
+         emit("/* String Constants */");
+         for (Symbol s: CONSTANT_POOL.values()){
+            emit("CONST_" + s._location + ": .asciz "
+                  + s.getObject().image + "\n.balign 4");
+         }
+         // Output the format strings for the number and string used by printf 
+         emit("/* printf Formats */\n.balign 4\n" 
+               + NUMBER_FORMAT + ": .asciz \"%d\"\n.balign 4\n"
+               + STRING_FORMAT + ": .asciz \"%s\"");
+
+         OUTPUT_FILE.close();
+
+      } //main
+
+
+      /**
+       * Symbol for holding user-defined names. We'll fill the Symbol table
+       * with these objects for each variable declared as well as for temporary
+       * things such as constants and temporary arithmetic products. No need to make
+       * things public/private or create methods, we're all friends here...
+       */
+      static class Symbol {
+         // If this is a temporary symbol, this is what getOffset will
+         // return as we'll set 0 for location
+         public static final int NONE = -1;
+         private int _lastRegister = NONE;
+
+         /**
+          * @param object   is the type of token
+          */
+         Symbol(Token object) {
+            this(object, NONE);
+         }
+
+         /**
+          * @param object   is the type of token
+          * @param location is the variable number used to locate storage
+          */
+         Symbol(Token object, int location) {
+            _object = object;
+            _location = location;
+         }
+
+         private Token _object;
+         // Location is a bit of a misnomer as this is really a count that
+         // can be used to compute the location of the variable by
+         // generating an offset from the fp 
+         private int _location;
+
+         /**
+          * @return the object for this symbol
+          */
+         public Token getObject() {
+            return _object;
+         }
+
+         /**
+          * @return the offset of this variable on the stack
+          */
+         public int getOffset() {
+            // ARM stack grows in a decreasing direction so miltiply by -1
+            return WORD_SIZE * -1 * _location;
+         }
+
+         /**
+          * @return last register this was assigned to
+          */
+         public int getRegister() {
+            return _lastRegister;
+         }
+
+         /**
+          * @param register holding this symbol
+          */
+         public void setRegister(int register) {
+            _lastRegister = register;
+         }
+
+         public String toString() {
+            return _object.image + " "+ _object.kind + " @location: " + _location +" @reg: "+_lastRegister;
+         }
+      }
+
+
+      /**
+       * Print the code to the output file
+       *
+       * @param code is the code to print
+       */
+      public static void emit(String code) {
+         OUTPUT_FILE.println(code);
+      }
+
+      static int nextRegister = 0;
+      // Variables and function for managing simple assignment of
+      // variables to registers; silently fails to work properly if more 
+      // than 8 temporaries are needed
+      public static int getNextRegister() {
+         return 2 + (nextRegister = (nextRegister + 1) % NUM_REGISTERS); 
+      }
+
+      public static int getRegisterHolding(Symbol forSymbol) {
+         int register;
+         switch (forSymbol.getObject().kind) {
+            case  HansenLiteConstants.STRING_CONST:
+               // If this is a constant string, it's a named constant in the
+               // .data section
+               emit("ldr r" + (register = getNextRegister() )
+                     + ", =CONST_" + forSymbol._location);
+               break;
+            case HansenLiteConstants.NUMBER:
+               // These kinds of symbols are either constants OR
+               // temporary values that are either being computed or
+               // already sitting on the operand stack.
+               //
+               // If this is a numeric constant with an "image" we load it
+               if (forSymbol.getObject().image != null) {
+                  emit("ldr r" + (register = getNextRegister())
+                        + ", =" + forSymbol.getObject().image);
+               }
+               else { // A temporary result 
+                  // If the result is already IN a register, then it's
+                  // probably an operand; if not, it's the destination
+                  // of an operation and needs a register
+                  if ((register = forSymbol.getRegister()) == Symbol.NONE) {
+                     register = getNextRegister();
+                     forSymbol.setRegister(register);
+                  }
+               }
+               break;
+            case HansenLiteConstants.IDENTIFIER:
+               // For stack-local variables we'll use stack-relative
+               // addressing via the fp and the symbol's offset
+               emit("ldr r" + (register = getNextRegister())
+                    + ", [fp, #" + forSymbol.getOffset() 
+                    + "]\t@"+ forSymbol);
+               break;
+            default: // Uh-oh - panic!
+               throw new RuntimeException("No clue what "+forSymbol.getObject().kind);
+         }
+         return register;
+      }
+
+
+
+      /*********************************************************************************
+        Semantic Actions
+       *********************************************************************************/
+
+      /**
+       * Emit code to store top of operand stack to the variable named by the
+       * token
+       */
+      public static void store(Token variable) throws ParseException {
+         // Assumes the value being stored is live in a register
+         Symbol toStore = OPERAND_STACK.pop();
+         int register = getRegisterHolding(toStore);
+         if (!SYMBOL_TABLE.containsKey(variable.image))
+            throw new ParseException("Encountered undeclared variable '" +
+                  variable.image + "' at line " + variable.beginLine +
+                  ", column " + variable.beginColumn);
+         // Store it to the stack-relative location it was previously allocated
+         emit("str r" + register
+               + ", [fp, #" +
+               SYMBOL_TABLE.get(variable.image).getOffset() + "]\t@"+variable.image);
+      }
+
+
+      /**
+       * Push variable onto the program stack. 
+       * Throw an exception if it's not been declared
+       */
+      public static void load(Token variable) throws ParseException {
+         if (!SYMBOL_TABLE.containsKey(variable.image))
+            throw new ParseException("Encountered undeclared variable '" +
+                  variable.image + "' at line " + variable.beginLine +
+                  ", column " + variable.beginColumn);
+         OPERAND_STACK.push(SYMBOL_TABLE.get(variable.image));
+      }
+
+
+      /**
+       * Create an anonymous symbol to hold the number and push onto the operand stack
+       */
+      public static void load_int(Token value) {
+         Symbol aNumber = new Symbol(value);
+         OPERAND_STACK.push(aNumber);
+      }
+
+
+      /**
+       * Push the string onto the operand stack
+       */
+      public static void load_string(Token value) {
+         // If we haven't seen this constant string before, create a new string constant in
+         // the constant pool and give it a unique number we will use later to identify it
+         // (e.g., const_1)
+         if (!CONSTANT_POOL.containsKey(value.image)) {
+            CONSTANT_POOL.put(value.image, new Symbol(value, CONSTANT_POOL.size()));
+         }
+         OPERAND_STACK.push(CONSTANT_POOL.get(value.image));
+      }
+
+
+      /**
+       * Compute the operation
+       */
+      public static void compute(Token operation) {
+         // TODO handle integer AND floating-point arithmetic
+         // If we need a temporary result I'm going to set the kind of
+         // object for that symbol to a number; in next version
+         // this would be important as we'd have a mix of int and float
+         // and would need to set it to the "kind" of the operand if it
+         // were an identifier - here I don't look at the kinds of
+         // operands but always set the type to be a number
+         Symbol result = new Symbol(new Token(HansenLiteConstants.NUMBER));
+         // Get the two operands and have them assigned to registers
+         int rhsRegister = getRegisterHolding(OPERAND_STACK.pop());
+         int lhsRegister = getRegisterHolding(OPERAND_STACK.pop());
+         int destRegister = getRegisterHolding(result); // May not need this, but that's OK for now
+         String arithmeticOperation = " r" + destRegister + ", r" + lhsRegister + ", r" + rhsRegister;
+
+         /*** Warning, "clever" code follows... ***/
+
+         // For arithmetic operations emit the instruction; note that
+         // for any relational operation we will omit a compare
+         // operation and then emit the appropriate branch in the switch
+         // that follows
+         switch (operation.kind) {
+            case HansenLiteConstants.SUB_OP:
+               emit("sub" + arithmeticOperation);
+               break;
+            case HansenLiteConstants.ADD_OP:
+               emit("add" + arithmeticOperation);
+               break;
+            case HansenLiteConstants.MULT_OP:
+               emit("mul" + arithmeticOperation);
+               break;
+            case HansenLiteConstants.DIV_OP:
+               // Divide is more complex as we must mov the sources into
+               // r0 and r1 and call the divide operation, moving the result
+               // from r0 to the destination register
+               emit("push {r0-r3,lr}\nmov r0, r" + lhsRegister + "\nmov r1, r" + rhsRegister);
+               emit("bl " + DIV_INSTRUCTION + "\nmov r" + destRegister + ",r0\npop {r0-r3,lr}");
+               break;
+               // All comparisons initially perform a compare using no destination register
+               // followed by a branch instruction emitted below and they need no resulting
+               // operand pushed onto the stack 
+            default:
+               emit("cmp" + " r" + lhsRegister + ", r" + rhsRegister);
+         }
+
+         // If this is a logical operation, then we emited a compare
+         // above and now emit code that tests for the OPPOSITE condition 
+         // and if true, jump to the "end" label. 
+         // 
+         // If it's not a logical operation (and we emited an arithmetic
+         // operation above), push the result we created above onto the
+         // operand stack
+         switch (operation.kind) {
+            case HansenLiteConstants.LE_OP:
+               emit("bgt end" + LABEL_STACK.peek());
+               break;
+            case HansenLiteConstants.GE_OP:
+               emit("blt end" + LABEL_STACK.peek());
+               break;
+            case HansenLiteConstants.NE_OP:
+               emit("beq end" + LABEL_STACK.peek());
+               break;
+            case HansenLiteConstants.LT_OP:
+               emit("bge end" + LABEL_STACK.peek());
+               break;
+            case HansenLiteConstants.GT_OP:
+               emit("ble end" + LABEL_STACK.peek());
+               break;
+            case HansenLiteConstants.EQ_OP:
+               emit("bne end" + LABEL_STACK.peek());
+               break;
+            default: // An arithmetic operation
+               // Push the resulting operand object onto the operand stack
+               // and mark it as live
+               OPERAND_STACK.push(result);
+         }
+
+      }
+
+
+      /**
+       * Negate the top of the program stack if the operator is '-'
+       */
+      public static void sign(Token sign) {
+         // If this is a negation sign, then negate the top of the operand stack; 
+         // this will be done in-place so we need to manually swap 
+         // the register reference
+         if (sign.kind == HansenLiteConstants.SUB_OP) {
+            // Get a register for the thing on top of the stack
+            int register = getRegisterHolding(OPERAND_STACK.pop());
+            // Create a new anopnymous symbol 
+            // TODO handle integer or float 
+            Symbol negated = new Symbol(new Token(HansenLiteConstants.NUMBER));
+
+            // Negate the old value into the same register
+            emit("neg r" + register +", r"+register);
+
+            // Replace the existing operand with the new one on the stack
+            negated.setRegister(register);
+            OPERAND_STACK.push(negated);
+         }
+      }
+
+
+      /**
+       * Add a variable or constant atop the operand stack to the symbol
+       * table
+       */
+      public static void declare(Token object) throws ParseException {
+         // No redeclarations!
+         if SYMBOL_TABLE.containsKey(object.image) {
+            throw new ParseException("Encountered duplicate declaration of variable '" +
+                  object.image + "' at line " + object.beginLine +
+                  ", column " + object.beginColumn);
+         }
+         // Add a new variable to the symbol table whose location is based on 
+         // the number of other variables already declared
+         SYMBOL_TABLE.put(object.image, new Symbol(object, SYMBOL_TABLE.size() + 1));
+         // Bump the stack pointer here to make room for this new local variable
+         emit("sub sp, sp, #"+WORD_SIZE+"\t @Local variable "+object.image);
+      }
+
+
+      /**
+       * Emit code to print an integer
+       */
+      public static void print_num_format() {
+         // Save r0-r3 and the lr and then load the format
+         emit("push {r0-r3,lr}\nldr r0, =" + NUMBER_FORMAT);
+      }
+
+
+      /**
+       * Emit code to print a string
+       */
+      public static void print_string_format() {
+         // Save r0-r3 and the lr and then load the format
+         emit("push {r0-r3,lr}\nldr r0, =" + STRING_FORMAT);
+      }
+
+
+      /**
+       * Emit code to call printf
+       */
+      public static void print_printf() {
+         // Call printf and then restore the registers we pushed
+         Symbol toPrint = OPERAND_STACK.pop();
+         int srcRegister = getRegisterHolding(toPrint);
+         // Need to move the value we want to print into r1 since it's probably
+         // not there
+         if (srcRegister != 1) {
+            emit("mov r1, r" + srcRegister);
+         }
+         // Print and restore r0-r3 and lr
+         emit("bl printf\npop {r0-r3,lr}");
+      }
+
+
+      /**
+       * Increment the next label number to maintain context for generating labels
+       */
+      public static void gen_labels() {
+         LABEL_STACK.push(++NEXT_LABEL_NUM);
+      }
+
+
+      /**
+       * Pop the current label context off the label stack
+       */
+      public static void pop_labels() {
+         LABEL_STACK.pop();
+      }
+
+
+      /**
+       * Emit "b" to the current label
+       */
+      public static void goto_begin() {
+         emit("b begin" + LABEL_STACK.peek());
+      }
+
+
+      /**
+       * Emit "b" to the current begin label
+       */
+      public static void goto_end() {
+         emit("b end" + LABEL_STACK.peek());
+      }
+
+
+      /**
+       * Emit a begin label
+       */
+      public static void begin_label() {
+         emit("begin" + LABEL_STACK.peek() + ":");
+      }
+
+
+      /**
+       * Emit an end label
+       */
+      public static void end_label() {
+         emit("end" + LABEL_STACK.peek() + ":");
+      }
+
+
+   } // HansenLite
+
+
+PARSER_END(HansenLite)
+
+
+
+
+
+   /***********************************************************************************
+     Language Definitiion
+    ***********************************************************************************/
+
+
+
+/******************
+ * TOKENS and LEXEMES
+ ******************/
+
+/* Whitespace, including comments */
+SKIP:{
+      " "
+         | "\t"
+         | "\n"
+         | "\r"
+         | <"{"(~["}"])*"}">
+}
+
+
+/* Constants */
+TOKEN:{
+         <#DIGIT:["0"-"9"]>
+            | <#LETTER:["A"-"Z","_","a"-"z"]>
+            | <NUMBER :<DIGIT> (<DIGIT>)*>
+            | <STRING_CONST :"\""(~["\""])*"\"">
+}
+
+
+/* Reserved words and identifiers */
+TOKEN:{
+         <VAR:"variable">
+            | <PRINT:"print">
+            | <IF:"if">
+            | <THEN:"then">
+            | <ELSE:"else">
+            | <WHILE:"while">
+            | <DO:"do">
+            | <BEGIN:"begin">
+            | <END:"end">
+            | <STATEMENT_SEP:";">
+            | <IDENTIFIER:<LETTER> (<LETTER> | <DIGIT>)*>
+}
+
+
+/* Individual operators */
+TOKEN:{
+         <ASSIGN_OP:":=">
+            | <ADD_OP:"+">
+            | <SUB_OP:"-">
+            | <MULT_OP:"*">
+            | <DIV_OP:"/">
+            | <LE_OP:"<=">
+            | <GE_OP:">=">
+            | <NE_OP:"<>">
+            | <LT_OP:"<">
+            | <GT_OP:">">
+            | <EQ_OP:"=">
+}
+
+
+
+
+
+/******************
+ * GRAMMAR
+ ******************/
+
+// Statements are assignments, if, while, print, variable declaration,
+// or a block-of-statements
+void Statement():{}
+{
+   AssignmentStatement()
+      | IfStatement()
+      | WhileStatement()
+      | PrintStatement()
+      | DeclarationStatement()
+      | Block()
+}
+
+
+// A variable declaration is the keyword "variable" followed by the name of a variable 
+void DeclarationStatement():{}
+{
+   <VAR><IDENTIFIER>
+      {declare(token);}
+}
+
+
+void AssignmentStatement():{Token variableName;}
+{
+   <IDENTIFIER>
+      {variableName=token;}
+   <ASSIGN_OP> Expression()
+      {store(variableName);}
+}
+
+
+// A block of code
+void Block():{}
+{
+   <BEGIN> StatementList() <END>
+}
+
+
+// Statement list is statement followed by more statements
+void StatementList():{}
+{
+   Statement() [ SeparatedList() ]
+}
+
+
+// Separated list is a separater followed by a statement then another
+// separated list
+void SeparatedList():{}
+{
+   <STATEMENT_SEP> Statement() [ SeparatedList() ]
+}
+
+
+void IfStatement():{}
+{
+   <IF>
+      {gen_labels();}
+   BooleanExpression()
+   <THEN>
+   Statement()
+      {goto_begin();end_label();}
+   [ LOOKAHEAD(2) ElseClause() ]
+      {begin_label();pop_labels();}
+}
+
+
+void ElseClause():{}
+{
+   <ELSE> Statement()
+}
+
+
+void WhileStatement():{}
+{
+   <WHILE>
+      {gen_labels();begin_label();}
+   BooleanExpression()
+   <DO>
+   Statement()
+      {goto_begin();end_label();pop_labels();}
+}
+
+
+void PrintStatement():{}
+{
+   <PRINT> PrintExpression()
+      {print_printf();}
+}
+
+
+void BooleanExpression():{Token operator;}
+{
+   Expression()
+   ( <LT_OP> | <GT_OP> | <LE_OP> | <GE_OP> | <NE_OP> | <EQ_OP> )
+      {operator=token;}
+   Expression()
+      {compute(operator);}
+}
+
+
+void PrintExpression():{}
+{
+   Expression()
+      {print_num_format();}
+   | <STRING_CONST>
+      {load_string(token);print_string_format();}
+}
+
+
+void Expression():{}
+{
+   Term()
+   [ 
+      AdditiveExpression() 
+   ]
+}
+
+void AdditiveExpression():{Token operator;}
+{
+   ( <ADD_OP> | <SUB_OP> )
+      {operator=token;}
+   Term()
+      {compute(operator);}
+   [
+      AdditiveExpression()
+   ] 
+}
+
+void Term():{}
+{
+   Factor()
+   [ 
+      LOOKAHEAD(2) MultiplicativeExpression() 
+   ]
+}
+
+void MultiplicativeExpression():{Token operator;}
+{
+   ( <MULT_OP> | <DIV_OP> )
+         {operator=token;}
+   Factor()
+         {compute(operator);}
+   [
+      LOOKAHEAD(2) MultiplicativeExpression()
+   ]
+}
+
+
+void Factor():{}
+{
+   "("Expression()")"
+   | <IDENTIFIER> 
+      {load(token);}
+   | <NUMBER> 
+      {load_int(token);}
+   | SignedTerm()
+}
+
+
+void SignedTerm():{Token operator=null;}
+{
+   <ADD_OP> | <SUB_OP>
+      {operator=token;}
+   Term() {if (operator!=null) sign(operator);}
+}

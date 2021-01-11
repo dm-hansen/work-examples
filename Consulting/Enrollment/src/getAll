@@ -1,0 +1,16 @@
+#!/bin/bash
+
+START_YEAR=2011    # First n-year period for which we predict
+
+# If we were given an argument, use it as the end year for which to pull
+# data; otherwise we use the current year
+END_YEAR=`date +%Y`
+if [ $# -gt 0 ]
+then
+     END_YEAR=$1
+fi
+
+for YEAR in `seq $START_YEAR $END_YEAR`
+do
+   ./getAllForYear $YEAR &
+done
