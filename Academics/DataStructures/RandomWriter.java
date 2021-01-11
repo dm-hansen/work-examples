@@ -32,8 +32,7 @@ public class RandomWriter {
     * @return the populated map of substring to character list
     */
    private static Map<String, List<Character>> buildMapFromInput(
-                           Map<String, 
-                           List<Character>> mapOfStringToChars, 
+                           Map<String, List<Character>> mapOfStringToChars, 
                            Reader input, int seedLength)
          throws java.io.IOException {
       final int EOF = -1;
