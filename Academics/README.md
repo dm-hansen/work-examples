@@ -12,4 +12,4 @@ These programs are intended to give a sense of my general programming
 style and technique; style and commenting are consistent between code I
 show students and solutions I craft for myself and for others in my
 consulting. These programs have been written over many years and no effort has been made to 
-keep up with changes to the implementation language (e.g., Java)
+keep up with changes to the implementation language (e.g., Java, Python)
