@@ -1,5 +1,5 @@
 In my AI course we run a semester-long project to develop a rule-based
-Clue playing agent. My (close guarded) agent, implemented in Prolog, is
+Clue playing agent. My (closely guarded) agent, implemented in Prolog, is
 shown here.
 
 Note that I have NOT attempted to optimize this code in any way. It is
