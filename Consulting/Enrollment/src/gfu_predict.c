@@ -17,7 +17,7 @@ int main(int argc, char* argv[])
    if (argc != NUM_ARGS)
    {
       fprintf(stderr, "Insufficient arguments\nUsage: %s <network file> <data file>\n", argv[0]);
-      exit(-1);
+      return EXIT_FAILURE;
    }
 
    
@@ -25,14 +25,14 @@ int main(int argc, char* argv[])
    if ( !(network = fann_create_from_file(argv[1])) )
    {
       perror("Error creating network --- ABORTING.\n");
-      return -1;
+      return EXIT_FAILURE;
    }
 
    // Open the data file
    if ( !(data = fann_read_train_from_file(argv[2])) )
    {
       fprintf(stderr, "Error opening data file %s\n", argv[2]);
-      return -1;
+      return EXIT_FAILURE;
    }
 
    // Iterate over every entry in the datafile and make a prediction
