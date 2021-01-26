@@ -39,7 +39,7 @@ int main(int argc, char* argv[])
    if (argc != NUM_ARGS)
    {
       fprintf(stderr, "Insufficient arguments\nUsage: %s <training data file> <output network filename>\n", argv[0]);
-      exit(-1);
+      return EXIT_FAILURE;
    }
 
 
@@ -47,7 +47,7 @@ int main(int argc, char* argv[])
    if ( !(data = fann_read_train_from_file(argv[1])) )
    {
       perror("Error opening data file--- ABORTING.\n");
-      exit(-1);
+      return EXIT_FAILURE;
    }
 
    // Create a network
